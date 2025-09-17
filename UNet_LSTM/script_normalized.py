@@ -736,7 +736,7 @@ def kfold_train(dataset, k_folds, prev_trained_days, batch_size, model_dir, num_
         print(f"Model for fold {fold_idx + 1 + prev_trained_days} saved as {model_save_path}.\n")
         start_epoch = 0
 
-def test_unet_on_dataset(model, dataset, device):
+def test_unet_on_dataset(model, dataset,flood_max = float, device):
     dataloader = DataLoader(dataset, batch_size=8, shuffle=False, collate_fn=custom_collate_fn)
 
     # Move and wrap model once
@@ -774,7 +774,7 @@ def test_unet_on_dataset(model, dataset, device):
                     crs=crs_list[i],
                     transform=transforms[i]
                 ) as dst:
-                    dst.write(out_arr, 1)
+                    dst.write(out_arr * flood_max, 1)
 
 # def test_unet_on_dataset(model, dataset, device):
 #     """
@@ -1018,9 +1018,24 @@ if sys.argv[1] == "train":
 elif sys.argv[1] == "test":
     event = "event2"
     # Load the trained model
-    model_path = f"{model_dir}/unet_model_fold_1.pt"
-    model, _ = load_model(model_path, device=device)
-    output_geotiff_dir =f"/p/vast1/lazin1/UNet_Geotiff_output/Sonoma_event2_prec_dem_LC_Hourly_script_fold11/test"
+    # model_path = f"{model_dir}/unet_model_fold_1.pt"
+    checkpoint_path = os.path.join(model_dir, "model_checkpoint.pth")
+    
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model = UNetLSTM()
+
+    model = model.to(device)
+    # if torch.cuda.device_count() > 1 and not isinstance(model, nn.DataParallel):
+    #     model = nn.DataParallel(model)
+
+    state_dict = checkpoint['model_state_dict']
+    # print("state_dict", state_dict.keys())
+    # if not isinstance(model, nn.DataParallel) and any(k.startswith("module.") for k in state_dict.keys()):
+    #     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict)
+    # model, _ = load_model(model_path, device=device)
+    output_geotiff_dir =f"/p/vast1/lazin1/UNet_Geotiff_output/Sonoma_event2_prec_dem_LC_Hourly_script_normalized/test"
     os.makedirs(output_geotiff_dir, exist_ok=True)
     
     
@@ -1039,9 +1054,9 @@ elif sys.argv[1] == "test":
     all_hours = pd.date_range(start=start_time, end=end_time, freq='h')
     dataset = FloodDataset(event, dem_dir, lc_dir, precip_dir, flood_dir, tile_csv, all_hours, sequence_length,
                         DEM_mean, DEM_std, H1_prec_mean, H1_prec_std,
-                        flood_mean=None, flood_std=None, output_geotiff_dir=output_geotiff_dir, return_metadata=True, mode='test')
+                        flood_min=0, flood_max=18, output_geotiff_dir=output_geotiff_dir, return_metadata=True, mode='test')
     
-    test_unet_on_dataset(model, dataset, device)
+    test_unet_on_dataset(model, dataset, flood_max=18, device)
     
 
 
