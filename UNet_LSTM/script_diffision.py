@@ -300,14 +300,64 @@ def load_model(model_path, device="cuda"):
 # =============== TRAINING / TESTING ========================
 # ============================================================
 
-def train_diffusion(diffusion, train_loader, val_loader, optimizer, checkpoint_path, scaler, fold_idx, start_epoch, num_epochs=10):
+# def train_diffusion(diffusion, train_loader, val_loader, optimizer, checkpoint_path, scaler, fold_idx, start_epoch, num_epochs=10):
+#     diffusion.train()
+#     for epoch in range(start_epoch, num_epochs):
+#         running_loss = 0.0
+#         for static, seq, target in tqdm(train_loader, desc=f"[Fold {fold_idx}] Epoch {epoch}"):
+#             optimizer.zero_grad()
+#             # with autocast(device_type="cuda"):
+#             #     loss = diffusion(target.to(device), static.to(device), seq.to(device))
+            
+#             with autocast_ctx():  # now always float32
+#                 loss = diffusion(target.float().to(device),
+#                                 static.float().to(device),
+#                                 seq.float().to(device))
+
+#             scaler.scale(loss).backward()
+#             scaler.step(optimizer)
+#             scaler.update()
+#             running_loss += loss.item() * static.size(0)
+
+#         epoch_loss = running_loss / len(train_loader.dataset)
+#         print(f"[Train] Fold {fold_idx}, Epoch {epoch}, Loss={epoch_loss:.4f}")
+#         save_checkpoint(diffusion, optimizer, epoch, fold_idx, checkpoint_path)
+        
+        
+
+#     return diffusion
+
+
+def train_diffusion(
+    diffusion,
+    train_loader,
+    val_loader,
+    optimizer,
+    checkpoint_path,
+    scaler,
+    fold_idx,
+    start_epoch,
+    num_epochs=10,
+):
+    criterion = nn.MSELoss()
     diffusion.train()
+    val_losses, mse_scores = [], []
+
     for epoch in range(start_epoch, num_epochs):
+        # ------------------------
+        # Training
+        # ------------------------
         running_loss = 0.0
         for static, seq, target in tqdm(train_loader, desc=f"[Fold {fold_idx}] Epoch {epoch}"):
             optimizer.zero_grad()
-            with autocast(device_type="cuda"):
-                loss = diffusion(target.to(device), static.to(device), seq.to(device))
+
+            with autocast_ctx():  # always float32 on ROCm
+                loss = diffusion(
+                    target.float().to(device),
+                    static.float().to(device),
+                    seq.float().to(device),
+                )
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -317,7 +367,41 @@ def train_diffusion(diffusion, train_loader, val_loader, optimizer, checkpoint_p
         print(f"[Train] Fold {fold_idx}, Epoch {epoch}, Loss={epoch_loss:.4f}")
         save_checkpoint(diffusion, optimizer, epoch, fold_idx, checkpoint_path)
 
-    return diffusion
+        # ------------------------
+        # Validation
+        # ------------------------
+        diffusion.eval()
+        val_loss = 0.0
+        mse_score = 0.0
+        with torch.no_grad():
+            for static, seq, target in val_loader:
+                with autocast_ctx():
+                    # Forward pass (note: diffusion returns loss during training,
+                    # but here we want model prediction, so call .model directly)
+                    pred = diffusion.model(
+                        static.float().to(device),
+                        seq.float().to(device),
+                    )
+                    tgt = target.float().to(device)
+
+                    loss = criterion(pred, tgt)
+                    val_loss += loss.item() * static.size(0)
+                    mse_score += F.mse_loss(pred, tgt, reduction="mean").item()
+
+        val_loss /= len(val_loader.dataset)
+        mse_score /= len(val_loader)
+
+        val_losses.append(val_loss)
+        mse_scores.append(mse_score)
+        print(f"[Val] Fold {fold_idx}, Epoch {epoch}, Loss={val_loss:.4f}, MSE={mse_score:.4f}")
+
+        # Save after validation too
+        save_checkpoint(diffusion, optimizer, epoch, fold_idx, checkpoint_path)
+
+        # Switch back to training
+        diffusion.train()
+
+    return diffusion, val_losses, mse_scores
 
 
 def test_diffusion(diffusion, dataset, device, output_dir):
@@ -351,6 +435,7 @@ def test_diffusion(diffusion, dataset, device, output_dir):
 
 def kfold_train(dataset, k_folds, batch_size, model_dir, num_epochs):
     model = UNetLSTM()
+    model = model.to(device).float()
     diffusion = GaussianDiffusion(model, timesteps=1000, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scaler = GradScaler()
