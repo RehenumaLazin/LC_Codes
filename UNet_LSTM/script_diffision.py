@@ -1,3 +1,30 @@
+# --- Device & AMP (works for NVIDIA CUDA and AMD ROCm) ---
+# import torch
+# from contextlib import nullcontext
+
+# if torch.cuda.is_available():                     # <-- covers ROCm too
+#     device = torch.device("cuda")
+# elif torch.backends.mps.is_available():
+#     device = torch.device("mps")
+# else:
+#     device = torch.device("cpu")
+
+# # Use AMP only on NVIDIA CUDA; disable on ROCm/CPU/MPS to avoid dtype mismatches
+# if device.type == "cuda" and torch.version.hip is None:  # NVIDIA only
+#     from torch.cuda.amp import autocast, GradScaler
+#     def autocast_ctx(): return autocast()
+#     scaler = GradScaler()
+# else:
+#     def autocast_ctx(): return nullcontext()             # no-op
+#     class _DummyScaler:
+#         def scale(self, loss): return loss
+#         def step(self, opt): opt.step()
+#         def update(self): pass
+#     scaler = _DummyScaler()
+
+
+
+
 import os
 import sys
 import glob
@@ -21,14 +48,33 @@ from sklearn.model_selection import KFold
 # --- Device ---
 if torch.backends.mps.is_available():
     device = torch.device("mps")
+    
 elif torch.version.hip is not None:
     from torch.amp import autocast, GradScaler
-    device = torch.device("hip")
+    # device = torch.device("hip")
 else:
     from torch.cuda.amp import autocast, GradScaler
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.cuda.empty_cache()
+
+# --- Device ---
+device = (
+    torch.device("cuda") if torch.cuda.is_available()
+    else torch.device("hip") if torch.version.hip is not None
+    else torch.device("cpu")
+)
+
+from contextlib import nullcontext
+# Force full float32 training everywhere (disable autocast on ROCm)
+def autocast_ctx():
+    return nullcontext()
+
+class _DummyScaler:
+    def scale(self, loss): return loss
+    def step(self, opt): opt.step()
+    def update(self): pass
+scaler = _DummyScaler()
 
 # ============================================================
 # ======================== DATASET ===========================
